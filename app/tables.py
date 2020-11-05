@@ -63,16 +63,16 @@ class Tables:
             insert_values = tuple(fields_data.values())
             print("INSERT query is ",insert_query,insert_values)
             cur.execute(insert_query,insert_values)
-            con.commit()
+            values_to_return = {} 
             if cur.rowcount == 1:
-                print('ROWCOUNT 1')
                 if return_fields:
                     returned_values = cur.fetchone()
-                    values_to_return = {} 
                     for column in return_fields:
                         print(returned_values[column])
-                        values_to_return.update({column,returned_values[column]})
-                    #: if returning values specified then this
+                        values_to_return.update({column:returned_values[column]})
+                con.commit()
+                #: if returning values specified then this
+                if return_fields:
                     return True,values_to_return
                 #: if simple create query then this
                 return True
@@ -89,15 +89,105 @@ class Tables:
                 cur.close()
                 db.dbs.put_up_a_connection(con)
     
-    def write(self, fields_data):
+    def write(self, fields_to_write,condition):
         '''
-        Takes {'column_name':value} like dictionary
+        Takes fields_to_write ==>{'column_name':value} like dictionary
         self is the current table,updates an old row in a table
+        condition is also a dict type , tells which row you want to update simply 
+        where clause condition
         '''
-        pass
+        con = db.dbs.get_a_connection()
+        con.autocommit=False
+        cur = None
+        try:
+            #print('table name is ',self.table_name)
+            #: check if received column names exist in this table
+            #: set of received column names - set of all column names
+            #: if received column names are in the set of all column names then
+            #: resulting set will be empty otherwise
+            #: it will contain the column name which do not exist in all cokumn names
+            #: EX:- x={1,2}  and y={1,2,3,4}
+            #: x.difference(y) => x={1,2} - {1,2,3,4} => x={}
+            #: if x={1,2,5} and y={1,2,3,4}
+            #: x.difference(y) => x={1,2,5} - {1,2,3,4} => x={5}
+            #: 5 does not exist in the set y    
+            cur = con.cursor(cursor_factory=DictCursor)
+            column_names = set(fields_to_write.keys()).difference(set(self.fields.keys()))
+            if column_names:
+                raise ColumnNotFoundException(column_names)
+            
+            coulmns_to_update = [ col + '=%s' for col in fields_to_write.keys()]
 
-    def search(self,search_fields):
-        pass
+            insert_query = f"UPDATE {self.table_name} SET ({','.join(coulmns_to_update)}) "
+
+            insert_values = tuple(fields_to_write.values())
+            print("INSERT query is ",insert_query,insert_values)
+            cur.execute(insert_query,insert_values)
+            values_to_return = {} 
+            if cur.rowcount == 1:
+                con.commit()
+                #: if simple create query then this
+                return True
+            
+        except (Error,DatabaseError,Exception) as e:
+            print('Error in tables ::',e)
+            #rollback the transaction if error occur
+            con.rollback()
+            return False
+        finally:
+            if con:
+                cur.close()
+                db.dbs.put_up_a_connection(con)
+
+    def _make_query(self,params):
+        def convert_to_condition(operand):
+            """
+            Convert ('age','=',12) to age = %s
+            """
+            return f"{operand[0]} {operand[1]} %s"
+
+        def query_conversion(search_params):
+            condition_values = list()
+            while True:
+                # print(i,search_params[i-1],search_params[i])
+                operandB = search_params.pop()
+                operandA = search_params.pop()
+                operator = 'AND' if search_params.pop() == '&' else 'OR'
+
+                whole_condition = ''
+                if type(operandB) == tuple:
+                    condition_values.insert(0,operandB[2])
+                    operandB = convert_to_condition(operandB)
+                elif type(operandB) == list:
+                    operandB,new_condition_values = query_conversion(operandB)
+                    new_condition_values.extend(condition_values)
+                    condition_values = new_condition_values
+
+                if type(operandA) == tuple:
+                    condition_values.insert(0,operandA[2])
+                    operandA = convert_to_condition(operandA)
+
+                elif type(operandA) == list:
+                    operandA,new_condition_values = query_conversion(operandA)
+                    new_condition_values.extend(condition_values)
+                    condition_values = new_condition_values
+
+                whole_condition = f"{operandA} {operator} {operandB}"
+                search_params.append(whole_condition)
+                if len(search_params) == 1:
+                    break
+            return f"({search_params[0]})",condition_values
+
+        condition_count = len(list(filter(lambda c: type(c) == tuple or type(c) == list ,params)))
+        for i in range(0,(condition_count*2)-3,2):
+            if not params[i] in ['&','|']:
+                params.insert(i,'|')
+        #: Return full where clause and values associated with the query 
+        complete_query, values = query_conversion(params)
+        return complete_query, values
+
+    def search(self,search_params):
+        complete_query, values = self._make_query(params=search_params)
 
     def initialize_fields(self):
         # contains all the fields that are in database
